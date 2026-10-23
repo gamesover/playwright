@@ -171,12 +171,15 @@ test(`connect page opened inside another client's group is released`, {
   ]);
 });
 
-test(`a client without a tab group coexists with a grouped client`, {
+test(`a client with all tabs shares the browser with a grouped client`, {
   annotation: { type: 'issue', description: 'https://github.com/microsoft/playwright/issues/43038' },
 }, async ({ browserWithExtension, startClient, server }) => {
   server.setContent('/second', '<title>Second</title><body>Second page</body>', 'text/html');
+  server.setContent('/existing', '<title>Existing</title><body>Existing page</body>', 'text/html');
 
   const browserContext = await browserWithExtension.launch();
+  const existingPage = await browserContext.newPage();
+  await existingPage.goto(server.PREFIX + '/existing');
   const token = await readExtensionToken(browserContext);
 
   const clientA = await connectWithName(browserWithExtension, startClient, token, 'client-a', ['--no-tab-group']);
@@ -184,6 +187,7 @@ test(`a client without a tab group coexists with a grouped client`, {
     name: 'browser_navigate',
     arguments: { url: server.HELLO_WORLD },
   })).toHaveResponse({ snapshot: expect.stringContaining('Hello, world!') });
+  await expect.poll(() => tabList(clientA)).toContain('Existing');
 
   const clientB = await connectWithName(browserWithExtension, startClient, token, 'client-b');
   expect(await clientB.callTool({
@@ -191,16 +195,31 @@ test(`a client without a tab group coexists with a grouped client`, {
     arguments: { url: server.PREFIX + '/second' },
   })).toHaveResponse({ snapshot: expect.stringContaining('Second page') });
 
-  // Neither connection took the other over.
-  expect(await tabList(clientA)).toContain('Title');
+  // The client with all tabs does not get the tab of the grouped client.
   expect(await tabList(clientA)).not.toContain('Second');
-  expect(await tabList(clientB)).toContain('Second');
   expect(await tabList(clientB)).not.toContain('Title');
+  expect(await tabList(clientB)).not.toContain('Existing');
 
   // Only the grouped client has a group, and it takes the first color.
   await expect.poll(() => playwrightGroups(browserContext)).toEqual([
     { title: 'Playwright · client-b', color: 'green' },
   ]);
+
+  // A tab dragged into the group goes to the grouped client.
+  const [sw] = browserContext.serviceWorkers();
+  await sw.evaluate(async () => {
+    const chrome = (globalThis as any).chrome;
+    const [second] = await chrome.tabs.query({ title: 'Second' });
+    const [existing] = await chrome.tabs.query({ title: 'Existing' });
+    await chrome.tabs.group({ groupId: second.groupId, tabIds: [existing.id] });
+  });
+  await expect.poll(() => tabList(clientB)).toContain('Existing');
+  await expect.poll(() => tabList(clientA)).not.toContain('Existing');
+
+  // When the grouped client disconnects, the client with all tabs gets its tabs.
+  await clientB.close();
+  await expect.poll(() => tabList(clientA)).toContain('Second');
+  await expect.poll(() => tabList(clientA)).toContain('Existing');
 });
 
 test(`status page disconnects a single client`, {

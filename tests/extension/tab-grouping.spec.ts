@@ -340,15 +340,19 @@ test('tab is re-added to Playwright group after reconnecting', async ({ browserW
   }).toEqual({ color: 'green', title: 'Playwright · test' });
 });
 
-test('connection with --no-tab-group runs without a Chrome tab group', {
+test('connection with --no-tab-group gets all tabs without a Chrome tab group', {
   annotation: { type: 'issue', description: 'https://github.com/microsoft/playwright/issues/43038' },
 }, async ({ browserWithExtension, startClient, server }) => {
+  server.setContent('/existing', '<title>Existing</title><body>Existing page</body>', 'text/html');
+  server.setContent('/later', '<title>Later</title><body>Later</body>', 'text/html');
   server.setContent('/second', '<title>Second</title><body>Second</body>', 'text/html');
 
   const browserContext = await browserWithExtension.launch();
 
   const page = await browserContext.newPage();
   await page.goto(server.HELLO_WORLD);
+  const existingPage = await browserContext.newPage();
+  await existingPage.goto(server.PREFIX + '/existing');
 
   const { client } = await startClient({
     args: ['--extension', '--no-tab-group'],
@@ -367,6 +371,20 @@ test('connection with --no-tab-group runs without a Chrome tab group', {
   await clickAllowAndSelect(connectPage, 'Title');
   await navigatePromise;
 
+  const tabList = async () => {
+    const response = await client.callTool({ name: 'browser_tabs', arguments: { action: 'list' } }) as any;
+    return response.content?.[0]?.text ?? '';
+  };
+
+  // The selected tab is the current one, and the tab that was open before is reachable too.
+  expect(await tabList()).toContain('(current) [Title]');
+  await expect.poll(tabList).toContain('[Existing]');
+
+  // A tab the user opens later is reachable as well.
+  const laterPage = await browserContext.newPage();
+  await laterPage.goto(server.PREFIX + '/later');
+  await expect.poll(tabList).toContain('[Later]');
+
   const [sw] = browserContext.serviceWorkers();
 
   // No Playwright group is created and the connected tab stays ungrouped.
@@ -378,6 +396,18 @@ test('connection with --no-tab-group runs without a Chrome tab group', {
       return { groupId: tab?.groupId ?? -1, groupCount: groups.length };
     });
   }).toEqual({ groupId: -1, groupCount: 0 });
+
+  // A tab the user moves into a group of their own stays connected.
+  await sw.evaluate(async () => {
+    const chrome = (globalThis as any).chrome;
+    const [tab] = await chrome.tabs.query({ title: 'Existing' });
+    await chrome.tabs.group({ tabIds: [tab.id] });
+  });
+  const index = (await tabList()).match(/- (\d+): \[Existing\]/)![1];
+  await client.callTool({ name: 'browser_tabs', arguments: { action: 'select', index: +index } });
+  expect(await client.callTool({ name: 'browser_snapshot' })).toHaveResponse({
+    inlineSnapshot: expect.stringContaining('Existing page'),
+  });
 
   // A page opened by the client is connected too, and stays ungrouped.
   await client.callTool({ name: 'browser_tabs', arguments: { action: 'new', url: server.PREFIX + '/second' } });

@@ -27,6 +27,12 @@ export function isNonDebuggableUrl(url: string | undefined): boolean {
   return !!url && NON_DEBUGGABLE_SCHEMES.some(s => url.startsWith(s));
 }
 
+// Pages a client with all tabs picks up. Extension pages, such as the connect
+// page of another client, are left alone.
+export function isPickableUrl(url: string | undefined): boolean {
+  return !!url && !isNonDebuggableUrl(url) && !url.startsWith('chrome-extension:');
+}
+
 type GroupColor = `${chrome.tabGroups.Color}`;
 
 export type GroupStyle = {
@@ -68,24 +74,34 @@ export async function cleanupStalePlaywrightGroups(): Promise<void> {
 //  - Relay attaches on its own (initial tab, popup, Target.createTarget) →
 //    `_onTabAttached` pulls the new tab into the group, whose onUpdated event
 //    flows back through `_onTabGroupChanged` for consistency.
-// Without a Chrome tab group (`groupStyle === null`) ownership is tracked
-// through attachment alone: the client reaches the initially selected tab and
-// the tabs it attaches itself, and the user cannot drag tabs in or out.
-// `_groupTabIds` caches group membership from Chrome events (or attachment in
-// the no-group mode) so hot-path checks in `_onTabUpdated` stay synchronous.
+// Without a Chrome tab group (`groupStyle === null`) the client has all tabs:
+// besides the tabs it attaches itself, it picks up every tab that no other
+// client has (see `pickUpTab`). Group changes do not affect its tabs.
+// `_groupTabIds` caches group membership from Chrome events (or the tabs the
+// client has, in the no-group mode) so hot-path checks in `_onTabUpdated`
+// stay synchronous.
 export class ConnectedTabGroup {
   readonly clientName: string | undefined;
   // The Chrome tab group style. Null when the connection opted out of grouping
-  // and owns its tabs through attachment alone.
+  // and has all tabs instead.
   readonly groupStyle: GroupStyle | null;
   private _connection: RelayConnection;
   private _isTabReserved: (tabId: number) => boolean;
   private _groupId: number | null = null;
   private _groupTabIds: Set<number> = new Set();
+  // Tabs the client has only because it has all tabs. Any other client that
+  // asks for one of them gets it.
+  private _pickedUpTabIds: Set<number> = new Set();
+  private _ready = false;
   private _onTabUpdatedListener: (tabId: number, changeInfo: chrome.tabs.OnUpdatedInfo, tab: chrome.tabs.Tab) => void;
   private _onTabRemovedListener: (tabId: number) => void;
 
   onclose?: () => void;
+  // Fires when the first tab is attached. The MCP client makes the first page
+  // it sees its current page, so other tabs are picked up only after that.
+  onready?: () => void;
+  // Runs before the debugger attaches to a tab; throws to refuse the attach.
+  onwillattach?: (tabId: number) => Promise<void>;
 
   constructor(connection: RelayConnection, selectedTab: chrome.tabs.Tab, clientName: string | undefined, groupStyle: GroupStyle | null, isTabReserved: (tabId: number) => boolean) {
     this.clientName = clientName;
@@ -95,6 +111,7 @@ export class ConnectedTabGroup {
     this._connection.onclose = () => this._onConnectionClose();
     this._connection.ontabattached = (tabId: number) => this._onTabAttached(tabId);
     this._connection.ontabdetached = (tabId: number) => this._onTabDetached(tabId);
+    this._connection.onwillattach = async (tabId: number) => await this.onwillattach?.(tabId);
     this._onTabUpdatedListener = this._onTabUpdated.bind(this);
     this._onTabRemovedListener = this._onTabRemoved.bind(this);
     chrome.tabs.onUpdated.addListener(this._onTabUpdatedListener);
@@ -111,15 +128,46 @@ export class ConnectedTabGroup {
     return [...this._groupTabIds];
   }
 
+  hasAllTabs(): boolean {
+    return !this.groupStyle;
+  }
+
+  isReady(): boolean {
+    return this._ready;
+  }
+
+  // How strongly the client holds a tab: 3 when the tab is in its Chrome tab
+  // group, 2 when the client attached or will attach the tab, 1 when it only
+  // picked the tab up, and 0 when it does not have the tab.
+  claimStrength(tabId: number): number {
+    if (this._pickedUpTabIds.has(tabId))
+      return 1;
+    if (this.groupStyle && this._groupTabIds.has(tabId))
+      return 3;
+    if (this._groupTabIds.has(tabId) || this._connection.claimsTab(tabId))
+      return 2;
+    return 0;
+  }
+
+  // Takes a tab that no client has. Only for a client that has all tabs.
+  pickUpTab(tab: chrome.tabs.Tab): void {
+    this._groupTabIds.add(tab.id!);
+    this._pickedUpTabIds.add(tab.id!);
+    this._connection.attachTab(tab);
+  }
+
+  async waitForPendingCreates(): Promise<void> {
+    await this._connection.waitForPendingCreates();
+  }
+
   close(reason: string): void {
     this._connection.close(reason);
   }
 
-  releaseTab(tabId: number): void {
-    if (!this._groupTabIds.has(tabId))
-      return;
+  async releaseTab(tabId: number): Promise<void> {
     this._groupTabIds.delete(tabId);
-    this._connection.detachTab(tabId);
+    this._pickedUpTabIds.delete(tabId);
+    await this._connection.detachTab(tabId);
   }
 
   private _onTabUpdated(tabId: number, changeInfo: chrome.tabs.OnUpdatedInfo, tab: chrome.tabs.Tab): void {
@@ -139,6 +187,10 @@ export class ConnectedTabGroup {
   // detaches on exit; a chrome:// tab stays in the group until it navigates
   // (handled in _onTabUpdated).
   private _onTabGroupChanged(tabId: number, tab: chrome.tabs.Tab): void {
+    // Without our own group, the user's groups are not ours to act on. A tab
+    // dragged into another client's group goes to that client in its attach.
+    if (!this.groupStyle)
+      return;
     const inOurGroup = this._groupId !== null && tab.groupId === this._groupId;
     const wasInGroup = this._groupTabIds.has(tabId);
     if (inOurGroup === wasInGroup)
@@ -156,12 +208,13 @@ export class ConnectedTabGroup {
     } else {
       this._groupTabIds.delete(tabId);
       if (this._connection.attachedTabs.has(tabId))
-        this._connection.detachTab(tabId);
+        void this._connection.detachTab(tabId);
     }
   }
 
   private _onTabRemoved(tabId: number): void {
     this._groupTabIds.delete(tabId);
+    this._pickedUpTabIds.delete(tabId);
   }
 
   private _onTabAttached(tabId: number): void {
@@ -170,6 +223,10 @@ export class ConnectedTabGroup {
       void this._addTabToGroup(tabId);
     else
       this._groupTabIds.add(tabId);
+    if (!this._ready) {
+      this._ready = true;
+      this.onready?.();
+    }
   }
 
   // The debugger detached (drag-out, tab close, or external action). Clear the
@@ -184,6 +241,7 @@ export class ConnectedTabGroup {
     chrome.tabs.onRemoved.removeListener(this._onTabRemovedListener);
     const groupTabs = [...this._groupTabIds];
     this._groupTabIds.clear();
+    this._pickedUpTabIds.clear();
     // Without a Chrome tab group the tabs were never grouped by us; the user
     // may have grouped them into their own group, which we must not touch.
     if (this.groupStyle && groupTabs.length)

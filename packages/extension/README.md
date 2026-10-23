@@ -32,19 +32,17 @@ Configure Playwright MCP server to connect to the browser using the extension by
 }
 ```
 
-## Usage
+## Let an AI Agent Use Your Chrome
 
-### Browser Tab Selection
+With an authentication token and the `--no-tab-group` option, an AI agent can use your Chrome the way you do: it reaches all your open tabs, the tabs you open later, and the sites you are signed in to. No approval dialog is shown, and no tab group is created.
 
-When the LLM interacts with the browser for the first time, it will load a page where you can select which browser tab the LLM will connect to. This allows you to control which specific page the AI assistant will interact with during the session.
+### 1. Copy the Token
 
-### Multiple Clients
+Click the extension icon to open the status page. Copy the `PLAYWRIGHT_MCP_EXTENSION_TOKEN` value. The token is unique to your browser profile.
 
-Several clients can be connected at the same time. Each one gets its own tab group, named after the client and colored apart from the other groups, and only sees the tabs in that group — a tab can belong to a single client at a time. Drag tabs in and out of a group to change what a client can reach, and use the extension's status page to see every connection and disconnect them individually.
+### 2. Configure the MCP Server
 
-### Disabling the Tab Group
-
-If several agent sessions run against the same browser, the strip fills with one group per session. To run a connection without a Chrome tab group, pass the `--no-tab-group` option to the MCP server:
+Pass `--extension` and `--no-tab-group`, and set the token:
 
 ```json
 {
@@ -55,15 +53,53 @@ If several agent sessions run against the same browser, the strip fills with one
         "@playwright/mcp@latest",
         "--extension",
         "--no-tab-group"
-      ]
+      ],
+      "env": {
+        "PLAYWRIGHT_MCP_EXTENSION_TOKEN": "your-token-here"
+      }
     }
   }
 }
 ```
 
-The `PLAYWRIGHT_MCP_NO_TAB_GROUP=1` environment variable can be used instead of the option.
+The `PLAYWRIGHT_MCP_NO_TAB_GROUP=1` environment variable can be used instead of the `--no-tab-group` option.
 
-Without the group, the client sees the page selected in the connect page and the pages it opens afterwards. Dragging a tab into the group to make it accessible is not available, and the tabs of the connection show no group — use the `✓` badge on the tab or the extension's status page to tell them apart. An out-of-date extension ignores the option and keeps grouping.
+### 3. Start Working
+
+When the agent uses the browser for the first time, Chrome opens the extension's connect page. The page connects at once, without a dialog, and becomes the agent's first tab. After that, the agent gets all other tabs. Ask the agent to list the tabs, switch to one, read it, or act on it, for example: "Find my open GitHub tab and summarize the pull request."
+
+These tabs are not available to the agent:
+- Pages that cannot be debugged, such as `chrome://` pages and extension pages.
+- Discarded tabs, until you open them again.
+- Tabs that another client is connected to.
+
+If you move a tab into or out of one of your own tab groups, the agent keeps it.
+
+### 4. Watch and Stop the Agent
+
+- A `✓` badge on the extension icon shows that the current tab is connected.
+- The status page lists every connection and its tabs. Click **Disconnect** to stop a connection.
+- When the agent's MCP server stops, the connection closes.
+
+### Security
+
+The agent can read and change everything in the tabs it reaches. This includes your signed-in sessions, cookies, and the content of every page. Any program that has the token can connect without approval. Keep the token secret. If you think someone else has it, click the refresh button next to the token on the status page ("Generate new token"), and then restart the browser.
+
+### Other Clients
+
+Other clients can connect at the same time, with or without a tab group. A tab goes to another client when that client selects it in its connect page, opens it, or gets it when you drag the tab into its group. A client with access to all tabs cannot take a tab from another client. When another client lets go of a tab or disconnects, the agent with access to all tabs gets that tab.
+
+An out-of-date extension ignores `--no-tab-group`, creates a tab group, and gives the agent only the tabs in that group.
+
+## Usage
+
+### Browser Tab Selection
+
+When the LLM interacts with the browser for the first time, it will load a page where you can select which browser tab the LLM will connect to. This allows you to control which specific page the AI assistant will interact with during the session.
+
+### Multiple Clients
+
+Several clients can be connected at the same time. Each one gets its own tab group, named after the client and colored apart from the other groups, and only sees the tabs in that group — a tab can belong to a single client at a time. A client started with `--no-tab-group` has no group and gets all free tabs instead, see [Let an AI Agent Use Your Chrome](#let-an-ai-agent-use-your-chrome). Drag tabs in and out of a group to change what a client can reach, and use the extension's status page to see every connection and disconnect them individually.
 
 ### Bypassing the Connection Approval Dialog
 

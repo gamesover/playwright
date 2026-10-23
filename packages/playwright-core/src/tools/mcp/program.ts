@@ -63,7 +63,7 @@ export function decorateMCPCommand(command: Command) {
       .option('--isolated', 'keep the browser profile in memory, do not save it to disk.')
       .option('--image-responses <mode>', 'whether to send image responses to the client. Can be "allow", "omit" or "only". With "only", a response that carries an image consists of the image parts alone, without the text part. Defaults to "allow".', enumParser.bind(null, '--image-responses', ['allow', 'omit', 'only']))
       .option('--no-sandbox', 'disable the sandbox for all process types that are normally sandboxed.')
-      .option('--no-tab-group', 'when connecting through --extension, do not put the pages the client controls into a Chrome tab group. Without the group, dragging a tab into it to make it accessible is not available.')
+      .option('--no-tab-group', 'when connecting through --extension, do not create a Chrome tab group. Instead, give the client access to all tabs that no other client is connected to, including the tabs opened later.')
       .option('--no-webmcp', 'do not collect or expose the tools that a page registers through the WebMCP API.')
       .option('--output-dir <path>', 'path to the directory for automatically named output files, for example a screenshot taken without an explicit file name. Files with an explicit name are resolved against the workspace root instead and are not affected by this option.')
       .option('--output-max-size <bytes>', 'Threshold for evicting old output files, in bytes.', numberParser)

@@ -58,10 +58,22 @@ const REATTACH_DELAY_MS = 150;
 const REATTACH_VERIFY_MS = 2500;
 const REATTACH_COOLDOWN_MS = 3000;
 
+// Debugger detaches still in flight, shared by all connections: a tab that one
+// connection lets go of can only be attached by another once the detach is done.
+const pendingDetaches = new Map<number, Promise<void>>();
+
 export class RelayConnection {
   private _ws: WebSocket;
   // Tabs whose debugger we have explicitly attached for this connection.
   private _attachedTabs = new Set<number>();
+  // Tabs this connection attached, or will attach: the tabs we sent to the
+  // relay, the popups of attached tabs and the tabs the relay opened. A tab
+  // stays claimed until it is released, closed, or fails to attach.
+  private _claimedTabs = new Set<number>();
+  // Tabs sent to the relay that it has not attached yet.
+  private _announcedTabs = new Set<number>();
+  private _pendingAttaches = new Map<number, Promise<void>>();
+  private _pendingCreates = new Set<Promise<unknown>>();
   // Once we've attached at least one tab, detaching the last one closes the connection.
   private _hasEverAttached = false;
   private _eventListeners: Array<{ remove: () => void }> = [];
@@ -72,9 +84,20 @@ export class RelayConnection {
   onclose?: () => void;
   ontabattached?: (tabId: number) => void;
   ontabdetached?: (tabId: number) => void;
+  // Runs before the debugger attaches to a tab; throws to refuse the attach.
+  onwillattach?: (tabId: number) => Promise<void>;
 
   get attachedTabs(): ReadonlySet<number> {
     return this._attachedTabs;
+  }
+
+  claimsTab(tabId: number): boolean {
+    return this._claimedTabs.has(tabId);
+  }
+
+  // Resolves once the tabs the relay is opening now exist and are claimed.
+  async waitForPendingCreates(): Promise<void> {
+    await Promise.all([...this._pendingCreates].map(created => created.catch(() => {})));
   }
 
   constructor(ws: WebSocket) {
@@ -105,25 +128,34 @@ export class RelayConnection {
   // chrome.debugger.attach, which flows through _handleCommand and fires
   // ontabattached.
   attachTab(tab: chrome.tabs.Tab): void {
-    if (this._closed || this._attachedTabs.has(tab.id!))
+    if (this._closed || this._attachedTabs.has(tab.id!) || this._announcedTabs.has(tab.id!))
       return;
+    this._claimedTabs.add(tab.id!);
+    this._announcedTabs.add(tab.id!);
     this._sendMessage({ method: 'chrome.tabs.onCreated', params: [tab] });
   }
 
-  // Called when the UI removes a tab from the Playwright group. We detach the
-  // debugger and update bookkeeping. chrome.debugger.detach does not fire
-  // onDetach for the caller, so we synthesize one so the relay notices the
-  // tab is gone.
-  detachTab(tabId: number): void {
+  // Called when the UI removes a tab from the Playwright group, or another
+  // client takes the tab. We detach the debugger and update bookkeeping.
+  // chrome.debugger.detach does not fire onDetach for the caller, so we
+  // synthesize one so the relay notices the tab is gone.
+  async detachTab(tabId: number): Promise<void> {
+    this._claimedTabs.delete(tabId);
+    this._announcedTabs.delete(tabId);
+    // An attach in flight detaches by itself once it sees the tab is no longer claimed.
+    const attaching = this._pendingAttaches.get(tabId);
+    if (attaching)
+      await attaching.catch(() => {});
     if (this._closed || !this._attachedTabs.has(tabId))
       return;
-    detachDebugger(tabId);
+    const detached = detachDebugger(tabId);
     this._notifyTabDetached(tabId);
     this._sendMessage({
       method: 'chrome.debugger.onDetach',
       params: [{ tabId }, 'target_closed'],
     });
     this._checkLastTabDetached();
+    await detached;
   }
 
   private _notifyTabAttached(tabId: number): void {
@@ -155,11 +187,13 @@ export class RelayConnection {
     this._closed = true;
     this._pendingReattach.clear();
     this._recentReattach.clear();
+    this._claimedTabs.clear();
+    this._announcedTabs.clear();
     for (const l of this._eventListeners)
       l.remove();
     this._eventListeners = [];
     for (const tabId of [...this._attachedTabs]) {
-      detachDebugger(tabId);
+      void detachDebugger(tabId);
       this._notifyTabDetached(tabId);
     }
     this.onclose?.();
@@ -174,8 +208,15 @@ export class RelayConnection {
   // shared detach bookkeeping.
   private _onChromeEvent(fullMethod: string, args: any[]): void {
     const tabId = this._tabIdForEventArgs(fullMethod, args);
+    if (fullMethod === 'chrome.tabs.onRemoved') {
+      this._claimedTabs.delete(tabId!);
+      this._announcedTabs.delete(tabId!);
+    }
     if (tabId === undefined || !this._attachedTabs.has(tabId))
       return;
+    // The popup of an attached tab belongs to this connection from the start.
+    if (fullMethod === 'chrome.tabs.onCreated')
+      this._claimedTabs.add((args[0] as chrome.tabs.Tab).id!);
     this._sendMessage({ method: fullMethod, params: args });
     // chrome.debugger.onDetach is the single source of truth for detach bookkeeping.
     if (fullMethod === 'chrome.debugger.onDetach') {
@@ -280,19 +321,54 @@ export class RelayConnection {
     if (!ALLOWED_CHROME_COMMANDS.has(message.method))
       throw new Error(`Unknown method: ${message.method}`);
     const args = (message.params ?? []) as any[];
-    const result = await invokeChromeMethod(message.method, args);
-    // Attach bookkeeping; detach flows through the chrome.debugger.onDetach event.
-    if (message.method === 'chrome.debugger.attach') {
-      const target = args[0] as chrome.debugger.Debuggee | undefined;
-      if (target?.tabId !== undefined) {
-        // The connection may have closed while the attach was pending.
-        if (this._closed)
-          detachDebugger(target.tabId);
-        else
-          this._notifyTabAttached(target.tabId);
+    const tabId = (args[0] as chrome.debugger.Debuggee | undefined)?.tabId;
+    if (message.method === 'chrome.debugger.attach' && tabId !== undefined) {
+      const attached = this._attachDebugger(tabId, args);
+      this._pendingAttaches.set(tabId, attached);
+      try {
+        await attached;
+      } finally {
+        if (this._pendingAttaches.get(tabId) === attached)
+          this._pendingAttaches.delete(tabId);
       }
+      return {};
     }
+    const resultPromise = invokeChromeMethod(message.method, args);
+    if (message.method === 'chrome.tabs.create')
+      this._trackCreate(resultPromise);
+    const result = await resultPromise;
     return result ?? {};
+  }
+
+  // Attach bookkeeping; detach flows through the chrome.debugger.onDetach event.
+  private async _attachDebugger(tabId: number, args: any[]): Promise<void> {
+    try {
+      await this.onwillattach?.(tabId);
+      await pendingDetaches.get(tabId);
+      await invokeChromeMethod('chrome.debugger.attach', args);
+    } catch (error) {
+      this._announcedTabs.delete(tabId);
+      if (!this._attachedTabs.has(tabId))
+        this._claimedTabs.delete(tabId);
+      throw error;
+    }
+    this._announcedTabs.delete(tabId);
+    // The connection may have closed, or let go of the tab, while the attach was pending.
+    if (this._closed || !this._claimedTabs.has(tabId)) {
+      void detachDebugger(tabId);
+      throw new Error('Tab is no longer connected to this client');
+    }
+    this._notifyTabAttached(tabId);
+  }
+
+  // Claims a tab the relay opens as soon as it exists. This runs before any
+  // other code that waits for the same promise through waitForPendingCreates().
+  private _trackCreate(created: Promise<any>): void {
+    this._pendingCreates.add(created);
+    created.then(tab => {
+      if (!this._closed && tab?.id !== undefined)
+        this._claimedTabs.add(tab.id);
+    }, () => {}).finally(() => this._pendingCreates.delete(created));
   }
 
   private _sendError(code: number, message: string): void {
@@ -327,10 +403,15 @@ function resolveChromeMember(fullMethod: string): { obj: any; name: string } {
   return { obj, name: parts[parts.length - 1] };
 }
 
-function detachDebugger(tabId: number): void {
-  chrome.debugger.detach({ tabId }).catch(error => {
+function detachDebugger(tabId: number): Promise<void> {
+  const detached: Promise<void> = chrome.debugger.detach({ tabId }).catch(error => {
     debugLog('Error detaching tab:', error);
+  }).finally(() => {
+    if (pendingDetaches.get(tabId) === detached)
+      pendingDetaches.delete(tabId);
   });
+  pendingDetaches.set(tabId, detached);
+  return detached;
 }
 
 async function invokeChromeMethod(fullMethod: string, args: any[]): Promise<any> {

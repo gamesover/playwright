@@ -16,7 +16,7 @@
 
 import { debugLog } from './relayConnection';
 import { PendingConnections } from './pendingConnection';
-import { ConnectedTabGroup, cleanupStalePlaywrightGroups, isNonDebuggableUrl, ungroupTabs, uniqueGroupStyle } from './connectedTabGroup';
+import { ConnectedTabGroup, cleanupStalePlaywrightGroups, isNonDebuggableUrl, isPickableUrl, ungroupTabs, uniqueGroupStyle } from './connectedTabGroup';
 
 type PageMessage = {
   type: 'connectionRequested';
@@ -51,7 +51,15 @@ class PlaywrightExtension {
   constructor() {
     chrome.runtime.onMessage.addListener(this._onMessage.bind(this));
     chrome.action.onClicked.addListener(this._onActionClicked.bind(this));
+    chrome.tabs.onUpdated.addListener(this._onTabUpdated.bind(this));
     this._cleanupPromise = cleanupStalePlaywrightGroups();
+  }
+
+  // A tab that navigates to a page, leaves a client's group or is reloaded
+  // after a discard may now be free for a client that has all tabs.
+  private _onTabUpdated(tabId: number, changeInfo: chrome.tabs.OnUpdatedInfo): void {
+    if (changeInfo.url !== undefined || changeInfo.groupId !== undefined || changeInfo.discarded === false)
+      void this._pickUpFreeTabs();
   }
 
   // Promise-based message handling is not supported in Chrome: https://issues.chromium.org/issues/40753031
@@ -104,8 +112,8 @@ class PlaywrightExtension {
   private async _connectTab(selectorTabId: number, tab: chrome.tabs.Tab & { id: number }, clientName: string | undefined, groupTabs: boolean): Promise<void> {
     try {
       await this._cleanupPromise;
-      this._releaseTab(selectorTabId);
-      if (tab.id !== selectorTabId && this._connectedTabIds().has(tab.id))
+      await this._releaseTab(selectorTabId);
+      if (tab.id !== selectorTabId && this._isTabKept(tab.id))
         throw new Error('This tab is already connected to another client');
 
       const connection = await this._pendingConnections.take(selectorTabId);
@@ -115,7 +123,15 @@ class PlaywrightExtension {
       const id = ++this._lastConnectionId;
       const taken = [...this._connections.values()].flatMap(group => group.groupStyle ? [group.groupStyle] : []);
       const group = new ConnectedTabGroup(connection, tab, clientName, groupTabs ? uniqueGroupStyle(clientName, taken) : null, tabId => this._pendingConnections.has(tabId));
-      group.onclose = () => this._connections.delete(id);
+      group.onwillattach = tabId => this._prepareAttach(group, tabId);
+      group.onready = () => {
+        if (group.hasAllTabs())
+          void this._pickUpFreeTabs();
+      };
+      group.onclose = () => {
+        this._connections.delete(id);
+        void this._pickUpFreeTabs();
+      };
       this._connections.set(id, group);
 
       await Promise.all([
@@ -133,23 +149,57 @@ class PlaywrightExtension {
 
   // Chrome may create the connect page inside the active client's group.
   private async _releaseConnectPage(tabId: number): Promise<void> {
-    this._releaseTab(tabId);
+    await this._releaseTab(tabId);
     await ungroupTabs([tabId]);
   }
 
-  private _releaseTab(tabId: number): void {
-    for (const group of this._connections.values())
-      group.releaseTab(tabId);
+  private async _releaseTab(tabId: number): Promise<void> {
+    await Promise.all([...this._connections.values()].map(group => group.releaseTab(tabId)));
+  }
+
+  // The client with the strongest claim on a tab gets it; on a tie, the
+  // client that has the tab keeps it. In practice this lets any client take a
+  // tab that a client with all tabs only picked up.
+  private async _prepareAttach(group: ConnectedTabGroup, tabId: number): Promise<void> {
+    const strength = group.claimStrength(tabId);
+    const others = [...this._connections.values()].filter(other => other !== group && other.claimStrength(tabId) > 0);
+    if (others.some(other => other.claimStrength(tabId) >= strength))
+      throw new Error('This tab is already connected to another client');
+    await Promise.all(others.map(other => other.releaseTab(tabId)));
+  }
+
+  // Gives each tab that no client has to the oldest client that has all tabs.
+  private async _pickUpFreeTabs(): Promise<void> {
+    if (![...this._connections.values()].some(group => group.hasAllTabs()))
+      return;
+    // A tab that a client is opening right now belongs to that client.
+    await Promise.all([...this._connections.values()].map(group => group.waitForPendingCreates()));
+    const tabs = await chrome.tabs.query({}).catch(() => []);
+    const group = [...this._connections.values()].find(group => group.hasAllTabs() && group.isReady());
+    if (!group)
+      return;
+    for (const tab of tabs) {
+      if (this._isTabFree(tab))
+        group.pickUpTab(tab);
+    }
+  }
+
+  private _isTabFree(tab: chrome.tabs.Tab): boolean {
+    const tabId = tab.id;
+    if (tabId === undefined || tab.discarded || !isPickableUrl(tab.url || tab.pendingUrl) || this._pendingConnections.has(tabId))
+      return false;
+    return [...this._connections.values()].every(group => group.claimStrength(tabId) === 0);
   }
 
   private async _getTabs(selectorTabId: number | undefined): Promise<chrome.tabs.Tab[]> {
     const tabs = await chrome.tabs.query({});
-    const connectedTabIds = this._connectedTabIds();
-    return tabs.filter(tab => !isNonDebuggableUrl(tab.url) && (tab.id === selectorTabId || !connectedTabIds.has(tab.id!)));
+    return tabs.filter(tab => !isNonDebuggableUrl(tab.url) && (tab.id === selectorTabId || !this._isTabKept(tab.id!)));
   }
 
-  private _connectedTabIds(): Set<number> {
-    return new Set([...this._connections.values()].flatMap(group => group.connectedTabIds()));
+  // A tab that a client has for more than having all tabs. Other clients
+  // cannot select it.
+  private _isTabKept(tabId: number): boolean {
+    return [...this._connections.values()].some(group => group.claimStrength(tabId) >= 2);
   }
 
   private async _onActionClicked(): Promise<void> {
