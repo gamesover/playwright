@@ -64,6 +64,15 @@ Pass `--extension` and `--no-tab-group`, and set the token:
 
 The `PLAYWRIGHT_MCP_NO_TAB_GROUP=1` environment variable can be used instead of the `--no-tab-group` option.
 
+To keep the token out of the MCP configuration file, set both variables in your shell profile, for example `~/.zshrc`, and pass only `--extension` in the configuration:
+
+```sh
+export PLAYWRIGHT_MCP_EXTENSION_TOKEN=your-token-here
+export PLAYWRIGHT_MCP_NO_TAB_GROUP=1
+```
+
+The MCP server gets these variables only when the MCP client starts from that shell, for example a client that you run in a terminal. Apps that you start from the desktop or the Dock usually do not read the shell profile. For them, set the variables in the `env` block of the configuration.
+
 ### 3. Start Working
 
 When the agent uses the browser for the first time, Chrome opens the extension's connect page. The page connects at once, without a dialog, and becomes the agent's first tab. After that, the agent gets all other tabs. Ask the agent to list the tabs, switch to one, read it, or act on it, for example: "Find my open GitHub tab and summarize the pull request."
