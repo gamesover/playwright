@@ -346,6 +346,7 @@ test('connection with --no-tab-group gets all tabs without a Chrome tab group', 
   server.setContent('/existing', '<title>Existing</title><body>Existing page</body>', 'text/html');
   server.setContent('/later', '<title>Later</title><body>Later</body>', 'text/html');
   server.setContent('/second', '<title>Second</title><body>Second</body>', 'text/html');
+  server.setContent('/unloaded', '<title>Unloaded</title><body>Unloaded</body>', 'text/html');
 
   const browserContext = await browserWithExtension.launch();
 
@@ -353,6 +354,24 @@ test('connection with --no-tab-group gets all tabs without a Chrome tab group', 
   await page.goto(server.HELLO_WORLD);
   const existingPage = await browserContext.newPage();
   await existingPage.goto(server.PREFIX + '/existing');
+
+  const [sw] = browserContext.serviceWorkers();
+
+  // An unloaded tab never answers CDP commands, so it must not block the connection.
+  await sw.evaluate(async (url: string) => {
+    const chrome = (globalThis as any).chrome;
+    const tab = await chrome.tabs.create({ url, active: false });
+    await new Promise<void>(resolve => {
+      const listener = (tabId: number, changeInfo: any) => {
+        if (tabId === tab.id && changeInfo.status === 'complete') {
+          chrome.tabs.onUpdated.removeListener(listener);
+          resolve();
+        }
+      };
+      chrome.tabs.onUpdated.addListener(listener);
+    });
+    await chrome.tabs.discard(tab.id);
+  }, server.PREFIX + '/unloaded');
 
   const { client } = await startClient({
     args: ['--extension', '--no-tab-group'],
@@ -385,7 +404,14 @@ test('connection with --no-tab-group gets all tabs without a Chrome tab group', 
   await laterPage.goto(server.PREFIX + '/later');
   await expect.poll(tabList).toContain('[Later]');
 
-  const [sw] = browserContext.serviceWorkers();
+  // The unloaded tab becomes reachable once it loads.
+  expect(await tabList()).not.toContain('[Unloaded]');
+  await sw.evaluate(async () => {
+    const chrome = (globalThis as any).chrome;
+    const [tab] = await chrome.tabs.query({ title: 'Unloaded' });
+    await chrome.tabs.reload(tab.id);
+  });
+  await expect.poll(tabList).toContain('[Unloaded]');
 
   // No Playwright group is created and the connected tab stays ungrouped.
   await expect.poll(async () => {

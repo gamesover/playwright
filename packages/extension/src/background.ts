@@ -55,10 +55,11 @@ class PlaywrightExtension {
     this._cleanupPromise = cleanupStalePlaywrightGroups();
   }
 
-  // A tab that navigates to a page, leaves a client's group or is reloaded
-  // after a discard may now be free for a client that has all tabs.
+  // A tab that navigates to a page, leaves a client's group or starts to load
+  // after a discard or a session restore may now be free for a client that
+  // has all tabs.
   private _onTabUpdated(tabId: number, changeInfo: chrome.tabs.OnUpdatedInfo): void {
-    if (changeInfo.url !== undefined || changeInfo.groupId !== undefined || changeInfo.discarded === false)
+    if (changeInfo.url !== undefined || changeInfo.groupId !== undefined || changeInfo.status === 'loading')
       void this._pickUpFreeTabs();
   }
 
@@ -184,9 +185,11 @@ class PlaywrightExtension {
     }
   }
 
+  // An unloaded tab, such as a discarded tab or a tab that Chrome restored
+  // but did not load yet, has no renderer and never answers CDP commands.
   private _isTabFree(tab: chrome.tabs.Tab): boolean {
     const tabId = tab.id;
-    if (tabId === undefined || tab.discarded || !isPickableUrl(tab.url || tab.pendingUrl) || this._pendingConnections.has(tabId))
+    if (tabId === undefined || tab.status === 'unloaded' || !isPickableUrl(tab.url || tab.pendingUrl) || this._pendingConnections.has(tabId))
       return false;
     return [...this._connections.values()].every(group => group.claimStrength(tabId) === 0);
   }
