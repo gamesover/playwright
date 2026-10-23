@@ -61,17 +61,23 @@ export async function cleanupStalePlaywrightGroups(): Promise<void> {
   }
 }
 
-// The Playwright tab group for an active RelayConnection. The Chrome tab group
-// is the single source of truth for which tabs the client targets:
+// The tabs of an active RelayConnection. When the connection has a Chrome
+// tab group (the default), the group is the single source of truth for which
+// tabs the client targets:
 //  - User drags a tab in/out → `_onTabGroupChanged` attaches/detaches.
 //  - Relay attaches on its own (initial tab, popup, Target.createTarget) →
 //    `_onTabAttached` pulls the new tab into the group, whose onUpdated event
 //    flows back through `_onTabGroupChanged` for consistency.
-// `_groupTabIds` caches group membership from Chrome events so hot-path checks
-// in `_onTabUpdated` stay synchronous.
+// Without a Chrome tab group (`groupStyle === null`) ownership is tracked
+// through attachment alone: the client reaches the initially selected tab and
+// the tabs it attaches itself, and the user cannot drag tabs in or out.
+// `_groupTabIds` caches group membership from Chrome events (or attachment in
+// the no-group mode) so hot-path checks in `_onTabUpdated` stay synchronous.
 export class ConnectedTabGroup {
   readonly clientName: string | undefined;
-  readonly groupStyle: GroupStyle;
+  // The Chrome tab group style. Null when the connection opted out of grouping
+  // and owns its tabs through attachment alone.
+  readonly groupStyle: GroupStyle | null;
   private _connection: RelayConnection;
   private _isTabReserved: (tabId: number) => boolean;
   private _groupId: number | null = null;
@@ -81,7 +87,7 @@ export class ConnectedTabGroup {
 
   onclose?: () => void;
 
-  constructor(connection: RelayConnection, selectedTab: chrome.tabs.Tab, clientName: string | undefined, groupStyle: GroupStyle, isTabReserved: (tabId: number) => boolean) {
+  constructor(connection: RelayConnection, selectedTab: chrome.tabs.Tab, clientName: string | undefined, groupStyle: GroupStyle | null, isTabReserved: (tabId: number) => boolean) {
     this.clientName = clientName;
     this.groupStyle = groupStyle;
     this._isTabReserved = isTabReserved;
@@ -160,7 +166,10 @@ export class ConnectedTabGroup {
 
   private _onTabAttached(tabId: number): void {
     void this._updateBadge(tabId, CONNECTED_BADGE);
-    void this._addTabToGroup(tabId);
+    if (this.groupStyle)
+      void this._addTabToGroup(tabId);
+    else
+      this._groupTabIds.add(tabId);
   }
 
   // The debugger detached (drag-out, tab close, or external action). Clear the
@@ -175,7 +184,9 @@ export class ConnectedTabGroup {
     chrome.tabs.onRemoved.removeListener(this._onTabRemovedListener);
     const groupTabs = [...this._groupTabIds];
     this._groupTabIds.clear();
-    if (groupTabs.length)
+    // Without a Chrome tab group the tabs were never grouped by us; the user
+    // may have grouped them into their own group, which we must not touch.
+    if (this.groupStyle && groupTabs.length)
       void ungroupTabs(groupTabs);
     this.onclose?.();
   }
@@ -197,13 +208,14 @@ export class ConnectedTabGroup {
   // that arrives concurrently (`_groupId` still null, wasInGroup still false)
   // becomes a harmless no-op rather than taking the drag-out branch.
   private async _addTabToGroup(tabId: number): Promise<void> {
-    if (this._groupTabIds.has(tabId))
+    const groupStyle = this.groupStyle;
+    if (!groupStyle || this._groupTabIds.has(tabId))
       return;
     try {
       await retryOnDrag(async () => {
         if (this._groupId === null) {
           this._groupId = await chrome.tabs.group({ tabIds: [tabId] });
-          await chrome.tabGroups.update(this._groupId, this.groupStyle);
+          await chrome.tabGroups.update(this._groupId, groupStyle);
         } else {
           await chrome.tabs.group({ groupId: this._groupId, tabIds: [tabId] });
         }

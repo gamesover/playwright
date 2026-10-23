@@ -42,6 +42,29 @@ When the LLM interacts with the browser for the first time, it will load a page 
 
 Several clients can be connected at the same time. Each one gets its own tab group, named after the client and colored apart from the other groups, and only sees the tabs in that group — a tab can belong to a single client at a time. Drag tabs in and out of a group to change what a client can reach, and use the extension's status page to see every connection and disconnect them individually.
 
+### Disabling the Tab Group
+
+If several agent sessions run against the same browser, the strip fills with one group per session. To run a connection without a Chrome tab group, pass the `--no-tab-group` option to the MCP server:
+
+```json
+{
+  "mcpServers": {
+    "playwright-extension": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest",
+        "--extension",
+        "--no-tab-group"
+      ]
+    }
+  }
+}
+```
+
+The `PLAYWRIGHT_MCP_NO_TAB_GROUP=1` environment variable can be used instead of the option.
+
+Without the group, the client sees the page selected in the connect page and the pages it opens afterwards. Dragging a tab into the group to make it accessible is not available, and the tabs of the connection show no group — use the `✓` badge on the tab or the extension's status page to tell them apart. An out-of-date extension ignores the option and keeps grouping.
+
 ### Bypassing the Connection Approval Dialog
 
 By default, you'll need to approve each connection when the MCP server tries to connect to your browser. To bypass this approval dialog and allow automatic connections, you can use an authentication token.

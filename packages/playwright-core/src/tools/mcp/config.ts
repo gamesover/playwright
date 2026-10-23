@@ -64,6 +64,8 @@ export type CLIOptions = {
   imageResponses?: 'allow' | 'omit' | 'only';
   mobile?: boolean;
   sandbox?: boolean;
+  // Commander camelizes the "--no-tab-group" flag to `tabGroup = false`.
+  tabGroup?: boolean;
   outputDir?: string;
   outputMaxSize?: number;
   port?: number;
@@ -216,12 +218,13 @@ export async function resolveCLIConfigForCLI(daemonProfilesDir: string, sessionN
   return { ...result, browser, configFile, skillMode: true };
 }
 
-export function resolveExtensionOptions(cliOptions: CLIOptions): { channel: string, executablePath?: string, profileDirName?: string } {
+export function resolveExtensionOptions(cliOptions: CLIOptions): { channel: string, executablePath?: string, profileDirName?: string, noTabGroup?: boolean } {
   const browser = cliOptions.browser ?? envToString(process.env.PLAYWRIGHT_MCP_BROWSER);
   const { channel } = resolveBrowserParam(browser);
   const executablePath = cliOptions.executablePath ?? envToString(process.env.PLAYWRIGHT_MCP_EXECUTABLE_PATH);
   const profileDirName = cliOptions.profileDirName ?? envToString(process.env.PLAYWRIGHT_MCP_PROFILE_DIR_NAME);
-  return { channel: channel ?? 'chrome', executablePath, profileDirName };
+  const noTabGroup = cliOptions.tabGroup === false || envToBoolean(process.env.PLAYWRIGHT_MCP_NO_TAB_GROUP) === true;
+  return { channel: channel ?? 'chrome', executablePath, profileDirName, noTabGroup };
 }
 
 async function validateBrowserConfig(browser: MergedConfig['browser']): Promise<FullConfig['browser']> {

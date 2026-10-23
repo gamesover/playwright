@@ -75,8 +75,8 @@ async function createBrowser(config: FullConfig, clientInfo: ClientInfo, cliOpti
     browser = await createIsolatedBrowser(config, clientInfo);
     ownership = 'own';
   } else if (config.extension) {
-    const { channel, executablePath, profileDirName } = resolveExtensionOptions(cliOptions);
-    browser = await createExtensionBrowser(channel, executablePath, config.browser.userDataDir, profileDirName, clientInfo.clientName);
+    const { channel, executablePath, profileDirName, noTabGroup } = resolveExtensionOptions(cliOptions);
+    browser = await createExtensionBrowser(channel, executablePath, config.browser.userDataDir, profileDirName, noTabGroup === true, clientInfo.clientName);
     ownership = 'attached';
   } else {
     browser = await createPersistentBrowser(config, clientInfo);

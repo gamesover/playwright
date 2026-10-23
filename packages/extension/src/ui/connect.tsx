@@ -36,6 +36,9 @@ const clientInfo = (() => {
   }
 })();
 
+// The server can opt this connection out of the Chrome tab group.
+const groupTabs = new URLSearchParams(window.location.search).get('groupTabs') !== 'false';
+
 const ConnectApp: React.FC = () => {
   const [tabs, setTabs] = useState<chrome.tabs.Tab[]>([]);
   const [status, setStatus] = useState<Status | null>(null);
@@ -142,6 +145,7 @@ const ConnectApp: React.FC = () => {
         type: 'connectToTab',
         tab,
         clientName: clientInfo,
+        groupTabs,
       });
 
       if (response?.success) {

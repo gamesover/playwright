@@ -339,3 +339,55 @@ test('tab is re-added to Playwright group after reconnecting', async ({ browserW
     });
   }).toEqual({ color: 'green', title: 'Playwright · test' });
 });
+
+test('connection with --no-tab-group runs without a Chrome tab group', {
+  annotation: { type: 'issue', description: 'https://github.com/microsoft/playwright/issues/43038' },
+}, async ({ browserWithExtension, startClient, server }) => {
+  server.setContent('/second', '<title>Second</title><body>Second</body>', 'text/html');
+
+  const browserContext = await browserWithExtension.launch();
+
+  const page = await browserContext.newPage();
+  await page.goto(server.HELLO_WORLD);
+
+  const { client } = await startClient({
+    args: ['--extension', '--no-tab-group'],
+    env: {
+      PWTEST_EXTENSION_USER_DATA_DIR: browserWithExtension.userDataDir,
+    },
+  });
+
+  const connectPagePromise = browserContext.waitForEvent('page', page =>
+    page.url().startsWith(`chrome-extension://${extensionId}/connect.html`)
+  );
+
+  const navigatePromise = client.callTool({ name: 'browser_navigate', arguments: { url: server.HELLO_WORLD } });
+  const connectPage = await connectPagePromise;
+
+  await clickAllowAndSelect(connectPage, 'Title');
+  await navigatePromise;
+
+  const [sw] = browserContext.serviceWorkers();
+
+  // No Playwright group is created and the connected tab stays ungrouped.
+  await expect.poll(async () => {
+    return sw.evaluate(async () => {
+      const chrome = (globalThis as any).chrome;
+      const [tab] = await chrome.tabs.query({ title: 'Title' });
+      const groups = await chrome.tabGroups.query({});
+      return { groupId: tab?.groupId ?? -1, groupCount: groups.length };
+    });
+  }).toEqual({ groupId: -1, groupCount: 0 });
+
+  // A page opened by the client is connected too, and stays ungrouped.
+  await client.callTool({ name: 'browser_tabs', arguments: { action: 'new', url: server.PREFIX + '/second' } });
+  await expect.poll(async () => {
+    return sw.evaluate(async (targetUrl: string) => {
+      const chrome = (globalThis as any).chrome;
+      const [t] = await chrome.tabs.query({ url: targetUrl });
+      if (!t?.id)
+        return null;
+      return { groupId: t.groupId, badge: await chrome.action.getBadgeText({ tabId: t.id }) };
+    }, server.PREFIX + '/second');
+  }).toEqual({ groupId: -1, badge: '✓' });
+});

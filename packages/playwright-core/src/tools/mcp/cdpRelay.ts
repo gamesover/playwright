@@ -73,15 +73,17 @@ export class CDPRelayServer {
   private _cdpConnection: WebSocket | null = null;
   private _extensionConnection: ExtensionConnection | null = null;
   private _protocolVersion: number;
+  private _noTabGroup: boolean;
   private _token?: string;
   private _handler: ExtensionProtocolV2;
   private _extensionConnectionPromise = new ManualPromise<void>();
 
-  constructor(browserChannel: string, executablePath?: string, customUserDataDir?: string, profileDirectory?: string) {
+  constructor(browserChannel: string, executablePath?: string, customUserDataDir?: string, profileDirectory?: string, noTabGroup?: boolean) {
     this._browserChannel = browserChannel;
     this._executablePath = executablePath;
     this._customUserDataDir = customUserDataDir;
     this._profileDirectory = profileDirectory;
+    this._noTabGroup = !!noTabGroup;
     this._protocolVersion = parseInt(process.env.PWTEST_EXTENSION_PROTOCOL ?? protocol.VERSION.toString(), 10);
     this._token = process.env.PLAYWRIGHT_MCP_EXTENSION_TOKEN;
 
@@ -156,6 +158,9 @@ export class CDPRelayServer {
     };
     url.searchParams.set('client', JSON.stringify(client));
     url.searchParams.set('protocolVersion', this._protocolVersion.toString());
+    // Older extensions ignore the parameter and keep grouping, which is today's behavior.
+    if (this._noTabGroup)
+      url.searchParams.set('groupTabs', 'false');
     if (this._token)
       url.searchParams.set('token', this._token);
     const href = url.toString();

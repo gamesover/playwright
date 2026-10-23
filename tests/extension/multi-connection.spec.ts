@@ -23,10 +23,10 @@ import type { BrowserContext } from 'playwright';
 
 // Connects without the approval dialog, so a test can start several clients
 // and tell them apart by name.
-async function connectWithName(browserWithExtension: BrowserWithExtension, startClient: StartClient, token: string, clientName: string): Promise<Client> {
+async function connectWithName(browserWithExtension: BrowserWithExtension, startClient: StartClient, token: string, clientName: string, extraArgs: string[] = []): Promise<Client> {
   const { client } = await startClient({
     clientName,
-    args: ['--extension'],
+    args: ['--extension', ...extraArgs],
     env: {
       PLAYWRIGHT_MCP_EXTENSION_TOKEN: token,
       PWTEST_EXTENSION_USER_DATA_DIR: browserWithExtension.userDataDir,
@@ -168,6 +168,38 @@ test(`connect page opened inside another client's group is released`, {
   await expect.poll(() => playwrightGroups(browserContext)).toEqual([
     { title: 'Playwright · test', color: 'green' },
     { title: 'Playwright · test (2)', color: 'blue' },
+  ]);
+});
+
+test(`a client without a tab group coexists with a grouped client`, {
+  annotation: { type: 'issue', description: 'https://github.com/microsoft/playwright/issues/43038' },
+}, async ({ browserWithExtension, startClient, server }) => {
+  server.setContent('/second', '<title>Second</title><body>Second page</body>', 'text/html');
+
+  const browserContext = await browserWithExtension.launch();
+  const token = await readExtensionToken(browserContext);
+
+  const clientA = await connectWithName(browserWithExtension, startClient, token, 'client-a', ['--no-tab-group']);
+  expect(await clientA.callTool({
+    name: 'browser_navigate',
+    arguments: { url: server.HELLO_WORLD },
+  })).toHaveResponse({ snapshot: expect.stringContaining('Hello, world!') });
+
+  const clientB = await connectWithName(browserWithExtension, startClient, token, 'client-b');
+  expect(await clientB.callTool({
+    name: 'browser_navigate',
+    arguments: { url: server.PREFIX + '/second' },
+  })).toHaveResponse({ snapshot: expect.stringContaining('Second page') });
+
+  // Neither connection took the other over.
+  expect(await tabList(clientA)).toContain('Title');
+  expect(await tabList(clientA)).not.toContain('Second');
+  expect(await tabList(clientB)).toContain('Second');
+  expect(await tabList(clientB)).not.toContain('Title');
+
+  // Only the grouped client has a group, and it takes the first color.
+  await expect.poll(() => playwrightGroups(browserContext)).toEqual([
+    { title: 'Playwright · client-b', color: 'green' },
   ]);
 });
 
